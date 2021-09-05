@@ -1,0 +1,109 @@
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:int="http://www.springframework.org/schema/integration"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:si-xml="http://www.springframework.org/schema/integration/xml"
+       xmlns:int-jdbc="http://www.springframework.org/schema/integration/jdbc"
+       xmlns:int-jms="http://www.springframework.org/schema/integration/jms"
+       xmlns:int-ftp="http://www.springframework.org/schema/integration/ftp"
+       xmlns:jms="http://www.springframework.org/schema/integration/jms"
+       xmlns:util="http://www.springframework.org/schema/util"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+
+		http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd
+        http://www.springframework.org/schema/integration/xml
+		http://www.springframework.org/schema/integration/xml/spring-integration-xml.xsd
+        http://www.springframework.org/schema/integration/jms http://www.springframework.org/schema/integration/jms/spring-integration-jms.xsd
+        http://www.springframework.org/schema/integration/jdbc http://www.springframework.org/schema/integration/jdbc/spring-integration-jdbc.xsd http://www.springframework.org/schema/integration/ftp https://www.springframework.org/schema/integration/ftp/spring-integration-ftp.xsd http://www.springframework.org/schema/util https://www.springframework.org/schema/util/spring-util.xsd">
+    <int:message-history/>
+    <context:component-scan base-package="com.oocl"/>
+    <context:property-placeholder location="classpath:application.properties" ignore-unresolvable="true"/>
+
+    <int:channel id="inboundChannel" >
+        <int:queue  message-store="mongoDbMessageStore"/>
+    </int:channel>
+
+    <int:channel id="deadLetterChannel" >
+        <int:queue />
+    </int:channel>
+
+    <int:channel id="ftpPrehandleChannel"/>
+    <int:channel id="ftpInputChannel"/>
+
+    <int-ftp:inbound-streaming-channel-adapter
+            comparator="ftpFileModifiedTimeComparator"
+            id="demoFtpAdapter"
+            channel="ftpPrehandleChannel"
+            session-factory="cachingSessionFactory"
+            filename-pattern="${file-pattern}"
+            remote-file-separator="/"
+            remote-directory="${remote-directory}">
+        <int:poller fixed-delay="${ftp-fixed-delay}"/>
+    </int-ftp:inbound-streaming-channel-adapter>
+
+    <int:stream-transformer charset="UTF-8" input-channel="ftpPrehandleChannel" output-channel="ftpInputChannel"/>
+
+    <int:chain input-channel="ftpInputChannel" output-channel="inboundChannel">
+        <int:header-enricher>
+            <int:header name="msgType" value="PO" overwrite="true"/>
+            <int:header name="fileName" expression="headers.file_remoteFile"/>
+            <int:header name="originalFileContent" expression="payload"/>
+            <int:header name="modifiedTime" expression="#jsonPath(headers.get('file_remoteFileInfo'), '$.modified')" />
+        </int:header-enricher>
+        <si-xml:xpath-header-enricher>
+            <si-xml:header name="senderID" xpath-expression="//*[local-name() = 'SENDER_ID' and namespace-uri() = 'http://www.oocllogistics.com/header']"/>
+        </si-xml:xpath-header-enricher>
+        <int-ftp:outbound-gateway session-factory="cachingSessionFactory"
+                                  id="outboundGateway"
+                                  command="mv"
+                                  expression="headers.file_remoteDirectory+'/'+headers.file_remoteFile"
+                                  rename-expression="headers.file_remoteDirectory+'/backup/'+headers.file_remoteFile + new java.text.SimpleDateFormat('yyyyMMddHHmmssSSS').format(new java.util.Date())"
+        />
+        <int:transformer expression="headers.originalFileContent"/>
+        <int:header-filter header-names="originalFileContent"/>
+    </int:chain>
+
+
+    <bean id="ftpClientFactory"
+          class="org.springframework.integration.ftp.session.DefaultFtpSessionFactory">
+        <property name="host" value="${ftp.host}"/>
+        <property name="port" value="${ftp.port}"/>
+        <property name="username" value="${ftp.username}"/>
+        <property name="password" value="${ftp.password}"/>
+        <property name="clientMode" value="${ftp.clientMode}"/>
+        <property name="fileType" value="${ftp.fileType}"/>
+        <property name="bufferSize" value="${ftp.bufferSize}"/>
+        <property name="defaultTimeout" value="300000"/>
+        <property name="connectTimeout" value="300000"/>
+        <property name="dataTimeout" value="300000"/>
+    </bean>
+
+    <bean id="cachingSessionFactory" class="org.springframework.integration.file.remote.session.CachingSessionFactory">
+        <constructor-arg ref="ftpClientFactory"/>
+        <constructor-arg value="2"/>
+        <property name="sessionWaitTimeout" value="300000"/>
+        <property name="poolSize" value="2"/>
+    </bean>
+    <bean id="ftpFileModifiedTimeComparator" class="com.oocl.fileupload.adpter.FtpFileModifiedTimeComparator"/>
+
+    <bean id="jaxbUtils"
+          class="com.oocl.fileupload.utlis.JAXBUtils"
+          init-method="init">
+        <property name="contextProperties">
+            <util:properties location="classpath:jaxbcontext.properties" />
+        </property>
+        <property name="mapperProperties">
+            <util:properties location="classpath:jaxbmapper.properties" />
+        </property>
+    </bean>
+
+    <bean id="mongoDbMessageStore" class="org.springframework.integration.mongodb.store.MongoDbChannelMessageStore">
+        <constructor-arg ref="mongoDbFactory"/>
+    </bean>
+
+
+    <int:logging-channel-adapter channel="deadLetterChannel" log-full-message="true">
+        <int:poller fixed-delay="500"/>
+    </int:logging-channel-adapter>
+</beans>
